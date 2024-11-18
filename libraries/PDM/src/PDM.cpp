@@ -37,31 +37,9 @@ bool AP3_PDM::begin(pin_size_t pinPDMData, pin_size_t pinPDMClock)
     return (true);
 }
 
-bool AP3_PDM::end()
-{
-    uint32_t retval = am_hal_pdm_disable(_PDMhandle);
-    if (retval != AP3_OK)
-    {
-        return false;
-    }
-    retval = (uint32_t)am_hal_pdm_power_control(_PDMhandle, AM_HAL_PDM_POWER_OFF, false);
-    if (retval != AP3_OK)
-    {
-        return retval;
-    }
-    retval = am_hal_pdm_deinitialize(_PDMhandle);
-    if (retval != AP3_OK)
-    {
-        return false;
-    }
-    return true;
-}
-
 bool AP3_PDM::available(void)
 {
-    if (buff1New || buff2New)
-        return (true);
-    return (false);
+    return dataReady;
 }
 
 bool AP3_PDM::isOverrun(void)
@@ -107,6 +85,30 @@ uint32_t AP3_PDM::_begin(void)
         return retval;
     }
 
+
+    /*am_hal_gpio_pincfg_t bclkPinConfig = {
+    .uFuncSel = AM_HAL_PIN_19_I2SBCLK, // 7 corresponds to the function select for I2S BCLK
+    .ePowerSw = AM_HAL_GPIO_PIN_POWERSW_NONE, // No power switch
+    .ePullup = AM_HAL_GPIO_PIN_PULLUP_NONE, // Clear the pull-up bit
+    .eDriveStrength = AM_HAL_GPIO_PIN_DRIVESTRENGTH_2MA, // Set the drive strength as needed
+    .eGPOutcfg = 0, // Optional: Set GPIO output configuration if needed
+    .eGPInput = AM_HAL_GPIO_PIN_INPUT_ENABLE, // Optional: Set GPIO input enable if needed
+    .eIntDir = 0, // Optional: Set interrupt direction if needed
+    .eGPRdZero = 0, // Optional: Set GPIO read as zero if needed
+    .uIOMnum = 0, // Optional: Set IOM number (0-5) if applicable
+    .uNCE = 0, // Optional: Set NCE number (0-3) if applicable
+    .eCEpol = 0, // Optional: Set CE polarity if applicable
+};
+    //I2S_BCLK!!! TODO
+    pin_size_t I2S_BCLCK = 19;
+    //pincfg.uFuncSel = AM_HAL_PIN_19_I2SBCLK;
+    retval = am_hal_gpio_pinconfig(I2S_BCLCK, bclkPinConfig);
+    if (retval != AP3_OK)
+    {
+        return retval;
+    }*/
+
+
     // Initialize, power-up, and configure the PDM.
 
     // //User may want to change settings mid-sketch. Only init PDM if it's new.
@@ -132,11 +134,13 @@ uint32_t AP3_PDM::_begin(void)
         return retval;
     }
 
+
     retval = (uint32_t)am_hal_pdm_enable(_PDMhandle);
     if (retval != AP3_OK)
     {
         return retval;
     }
+
 
     //
     // Configure and enable PDM interrupts (set up to trigger on DMA
@@ -151,6 +155,8 @@ uint32_t AP3_PDM::_begin(void)
     // Configure DMA and set target address of internal buffer.
     sTransfer.ui32TargetAddr = (uint32_t)_pdmDataBuffer;
     sTransfer.ui32TotalCount = _pdmBufferSize * 2;
+    _writeIndex = 0;
+    _readIndex = 0;
 
     // Start the data transfer.
     am_hal_pdm_enable(_PDMhandle);
@@ -240,14 +246,39 @@ uint32_t AP3_PDM::getDecimationRate()
     return (_PDMconfig.ui32DecimationRate);
 }
 
+bool AP3_PDM::end()
+{
+    uint32_t retval = am_hal_pdm_disable(_PDMhandle);
+    if (retval != AP3_OK)
+    {
+        return false;
+    }
+    retval = (uint32_t)am_hal_pdm_power_control(_PDMhandle, AM_HAL_PDM_POWER_OFF, false);
+    if (retval != AP3_OK)
+    {
+        return retval;
+    }
+    retval = am_hal_pdm_deinitialize(_PDMhandle);
+    if (retval != AP3_OK)
+    {
+        return false;
+    }
+    return true;
+}
+
 //Send a given configuration struct to PDM
 bool AP3_PDM::updateConfig(am_hal_pdm_config_t newConfiguration)
 {
+    am_hal_pdm_disable(_PDMhandle);
     _PDMconfig = newConfiguration;
     uint32_t retval = (uint32_t)am_hal_pdm_configure(_PDMhandle, &_PDMconfig);
 
-    am_hal_pdm_enable(_PDMhandle); //Reenable after changes
+    
+    
+    am_hal_pdm_fifo_flush(_PDMhandle);
+    retval = am_hal_pdm_enable(_PDMhandle); //Reenable after changes
 
+    //am_hal_pdm_i2s_enable(_PDMhandle);
     if (retval != AP3_OK)
     {
         return false;
@@ -298,36 +329,19 @@ invalid_args:
     return retval;
 }
 
-//*****************************************************************************
-//
-// Read PDM data from internal buffer
-// Returns number of bytes read.
-//
-//*****************************************************************************
-uint32_t AP3_PDM::getData(uint16_t *externalBuffer, uint32_t externalBufferSize)
+uint32_t AP3_PDM::getData(int16_t *externalBuffer, uint32_t externalBufferSize)
 {
-    if (externalBufferSize > _pdmBufferSize)
-        externalBufferSize = _pdmBufferSize;
-
-    //Move data from internal buffers to external caller
-    if (buff1New == true)
+    if(dataReady)
     {
         for (int x = 0; x < externalBufferSize; x++)
         {
-            externalBuffer[x] = outBuffer1[x];
+            externalBuffer[x] = _pdmDataBuffer[x + _readIndex];
         }
-        buff1New = false;
+        _readIndex = (_readIndex + _pdmBufferSize) % _pdmExtBufferSize;
+        dataReady--;
+        return (externalBufferSize);   
     }
-    else if (buff2New == true)
-    {
-        for (int x = 0; x < externalBufferSize; x++)
-        {
-            externalBuffer[x] = outBuffer2[x];
-        }
-        buff2New = false;
-    }
-
-    return (externalBufferSize);
+    return 0;                
 }
 
 inline void AP3_PDM::pdm_isr(void)
@@ -342,36 +356,33 @@ inline void AP3_PDM::pdm_isr(void)
 
         if (ui32Status & AM_HAL_PDM_INT_DCMP)
         {
-            uint32_t tempReadAmt = _pdmBufferSize;
-
-            //Store in the first available buffer
-            if (buff1New == false)
-            {
-                for (int i = 0; i < _pdmBufferSize; i++)
-                {
-                    outBuffer1[i] = pi16Buffer[i];
-                }
-                buff1New = true;
-            }
-            else if (buff2New == false)
-            {
-                for (int i = 0; i < _pdmBufferSize; i++)
-                {
-                    outBuffer2[i] = pi16Buffer[i];
-                }
-                buff2New = true;
+            if(dataReady >= _bufferCount){
+                _overrun = true;
+                dataReady = 0;
+                sTransfer.ui32TargetAddr = (uint32_t)_pdmDataBuffer;
+                _writeIndex = 0;
+                _readIndex = 0;
             }
             else
             {
-                _overrun = true;
-                buff2New=false;
-                buff1New=false;
+                _writeIndex = (_writeIndex + _pdmBufferSize) % _pdmExtBufferSize;
+                sTransfer.ui32TargetAddr = (uint32_t)&_pdmDataBuffer[_writeIndex];
+                dataReady++;
             }
-
             //Start next conversion
             am_hal_pdm_dma_start(_PDMhandle, &sTransfer);
         }
     }
+}
+
+unsigned long AP3_PDM::bufferMS(int sampleRate)
+{
+    return (_pdmExtBufferSize*1000/sampleRate);
+}
+
+unsigned long AP3_PDM::bufferUsedMS(int sampleRate)
+{
+    return dataReady * _pdmBufferSize *1000 / sampleRate;
 }
 
 //*****************************************************************************
